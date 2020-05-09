@@ -1,3 +1,5 @@
+#pragma once
+
 #ifndef TELEGRAM_SENDER_H_INCLUDED
 #define TELEGRAM_SENDER_H_INCLUDED
 

@@ -1,3 +1,5 @@
+## Update to work with gcc-10 and add CMakeLists.txt
+
 # LibTelegram #
 Fast, efficient, header-only C++ Telegram bot API library using FastCGI.
 
