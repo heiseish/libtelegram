@@ -70,6 +70,13 @@ public:
   inline nlohmann::json send_json(std::string const &method,
                                   nlohmann::json const &tree = {},
                                   unsigned int poll_timeout = 30);
+  inline nlohmann::json send_multipart(std::string const &method,
+                                    httplib::MultipartFormDataItems &&tree = {},
+                                    unsigned int poll_timeout = 30);
+  template<typename T>
+  inline std::optional<T> send_multipart_and_parse(std::string const &method,
+                                              httplib::MultipartFormDataItems &&tree = {});
+
   template<typename T>
   inline std::optional<T> send_json_and_parse(std::string const &method,
                                               nlohmann::json const &tree = {});
@@ -206,6 +213,18 @@ public:
   template<typename Tchat_id = int_fast64_t>
   inline std::optional<types::message> send_voice(Tchat_id chat_id,
                                                   types::voice const &voice,
+                                                  std::string caption = {},
+                                                  bool disable_notification = false,
+                                                  int_fast32_t reply_to_message_id = reply_to_message_id_none,
+                                                  std::optional<std::variant<types::reply_markup::inline_keyboard_markup,
+                                                                             types::reply_markup::reply_keyboard_markup,
+                                                                             types::reply_markup::reply_keyboard_remove,
+                                                                             types::reply_markup::force_reply>> reply_markup = std::nullopt);
+  
+  // send voice using binary data `voice`
+  template<typename Tchat_id = int_fast64_t>
+  inline std::optional<types::message> send_voice(Tchat_id chat_id,
+                                                  std::string &&voice,
                                                   std::string caption = {},
                                                   bool disable_notification = false,
                                                   int_fast32_t reply_to_message_id = reply_to_message_id_none,
@@ -393,8 +412,47 @@ inline nlohmann::json sender::send_json(std::string const &method,
   #endif // NDEBUG
 
   urdl::url const url(endpoint + method);
-  httplib::SSLClient http_client(url.host().c_str(), url.port(), poll_timeout);
+  httplib::SSLClient http_client(url.host().c_str(), url.port());
+  http_client.set_timeout_sec(poll_timeout);
   auto http_result{http_client.Post((url.path() + "?" + url.query()).c_str(), tree.dump().c_str(), "application/json")};
+
+  if(!http_result) {
+    #ifndef NDEBUG
+      std::cerr << "LibTelegram: Sender: Unable to open URL " << url.to_string() << std::endl;
+    #endif // NDEBUG
+    throw std::runtime_error("Sender unable to open URL " + url.to_string());
+  } else if (http_result->status != 200) {
+    #ifndef NDEBUG
+      std::cerr << "LibTelegram: Sender: Unable to open URL " << url.to_string() << ": " << http_result->status << std::endl;
+    #endif // NDEBUG
+    throw std::runtime_error("Sender unable to open URL " + url.to_string() + ": " + std::to_string(http_result->status));
+  }
+  if(http_result->body.empty()) {
+    std::cerr << "LibTelegram: Sender: Received empty reply to send_json" << std::endl;
+    return nlohmann::json();                                                    // return an empty tree
+  }
+  boost::iostreams::stream<boost::iostreams::array_source> reply_stream(http_result->body.data(), http_result->body.size());
+  nlohmann::json reply_tree;                                                    // property tree to contain the reply
+  try {
+    reply_stream >> reply_tree;
+  } catch(std::exception &e) {
+    std::cerr << "LibTelegram: Sender: Received unparseable JSON in reply to send_json: " << e.what() << std::endl;
+  }
+  return reply_tree;
+}
+inline nlohmann::json sender::send_multipart(std::string const &method,
+                                        httplib::MultipartFormDataItems &&tree,
+                                        unsigned int poll_timeout) {
+  /// Function to send a json tree to the given method and get back a response, useful if you want to send custom requests
+  #ifndef NDEBUG
+    std::cerr << "LibTelegram: Sender: DEBUG: json request:" << std::endl;
+    std::cerr << tree.dump(2) << std::endl;
+  #endif // NDEBUG
+
+  urdl::url const url(endpoint + method);
+  httplib::SSLClient http_client(url.host().c_str(), url.port());
+  http_client.set_timeout_sec(poll_timeout);
+  auto http_result{http_client.Post((url.path() + "?" + url.query()).c_str(), tree)};
 
   if(!http_result) {
     #ifndef NDEBUG
@@ -426,6 +484,29 @@ inline std::optional<T> sender::send_json_and_parse(std::string const &method,
                                                     nlohmann::json const &tree) {
   /// Wrapper function to send a json object and get back a complete object of the specified template type
   auto reply_tree(send_json(method, tree));
+  #ifndef NDEBUG
+    std::cerr << "LibTelegram: Sender: DEBUG: json reply:" << std::endl;
+    std::cerr << reply_tree.dump(2) << std::endl;
+  #endif // NDEBUG
+  if(reply_tree["ok"] != true) {
+    std::cerr << "LibTelegram: Sender: Returned status other than OK in reply to " << method << " trying to get " << typeid(T).name() << ":" << std::endl;
+    std::cerr << reply_tree.dump(2) << std::endl;
+    return std::nullopt;
+  }
+  try {
+    return types::helpers::make_optional_from_json<T>(reply_tree, "result");
+  } catch(std::exception &e) {
+    std::cerr << "LibTelegram: Sender: Exception parsing the following tree to extract a " << typeid(T).name() << ": " << e.what() << std::endl;
+    std::cerr << reply_tree.dump(2) << std::endl;
+    return std::nullopt;
+  }
+}
+
+template<typename T>
+inline std::optional<T> sender::send_multipart_and_parse(std::string const &method,
+                                                    httplib::MultipartFormDataItems &&tree) {
+  /// Wrapper function to send a json object and get back a complete object of the specified template type
+  auto reply_tree(send_multipart(method, std::move(tree)));
   #ifndef NDEBUG
     std::cerr << "LibTelegram: Sender: DEBUG: json reply:" << std::endl;
     std::cerr << reply_tree.dump(2) << std::endl;
@@ -977,6 +1058,33 @@ inline std::optional<types::message> sender::send_voice(Tchat_id chat_id,
     std::visit([&tree](auto &&arg){arg.get(tree);}, *reply_markup);             // get the tree form of whatever variant we've passed
   }
   return send_json_and_parse<types::message>("sendVoice", tree);
+}
+template<typename Tchat_id>
+inline std::optional<types::message> sender::send_voice(Tchat_id chat_id,
+                                                        std::string&& voice,
+                                                        std::string caption,
+                                                        bool disable_notification,
+                                                        int_fast32_t reply_to_message_id,
+                                                        [[maybe_unused]] std::optional<std::variant<types::reply_markup::inline_keyboard_markup,
+                                                                                   types::reply_markup::reply_keyboard_markup,
+                                                                                   types::reply_markup::reply_keyboard_remove,
+                                                                                   types::reply_markup::force_reply>> reply_markup) {
+  /// Send audio files, if you want Telegram clients to display the file as a playable voice message. For this to work, your audio must be in an .ogg file encoded with OPUS (other formats may be sent as Audio or Document). On success, the sent Message is returned. Bots can currently send voice messages of up to 50 MB in size, this limit may be changed in the future - see https://core.telegram.org/bots/api#sendvoice
+  VERIFY_CHAT_ID
+  httplib::MultipartFormDataItems items = {
+    {"chat_id", std::to_string(chat_id), "", "" },
+    {"voice", std::move(voice), "record.mp3", "application/octet-stream"}
+  };                                              // we can also store a fetch url in the file id
+  if(!caption.empty()) {
+    items.push_back({"caption", caption, "", ""});
+  }
+  if(disable_notification) {
+    items.push_back({"disable_notification", "true", "", ""});
+  }
+  if(reply_to_message_id != reply_to_message_id_none) {
+    items.push_back({"reply_to_message_id", std::to_string(reply_to_message_id), "", ""});
+  }
+  return send_multipart_and_parse<types::message>("sendVoice", std::move(items));
 }
 template<typename Tchat_id>
 inline std::optional<types::message> sender::send_video_note(Tchat_id chat_id,
